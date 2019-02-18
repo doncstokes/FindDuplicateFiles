@@ -25,11 +25,14 @@ I am concidering an enhancement that would allow a command line option to specif
 files are duplicates. This would impact performance significantly on big files.
 
 ## Limitations
-This utility has only been tested on GNU/Linux, but with a tweek, should function on MS Windows. The program contains a function
-for obtaining the home directory (getHomeDir) that uses the environment variable "HOME" which exists on Linux/UNIX systems.
+This utility has only been tested on GNU/Linux, but with a tweek, should function on MS Windows.
+The program contains a function for obtaining the home directory (getHomeDir)
+that uses the environment variable "HOME" which exists on Linux/UNIX systems.
 I don't remember if this exists on MS Windows. To support MSW, getHomeDir should be enhanced to detect the running OS and use
 The correct environment variable(s) to locate the user home directory. Access to the user home directory is required for creating
 the database directory that stores the file hashes and found duplicate file records.
+A workaround for MSW that should allow this version to work is define the "HOME" environment variable containing
+the directory name of your home directory.
 
 ## Dependencies
 I am currently using openjdk-8 for my Java version, but the most exotic Java feature used in this source is generics.
