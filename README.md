@@ -48,7 +48,7 @@ a java project called "FindDupFiles". Move the contents of this git project into
 If using "eclipse", modify the project build path to include the external archive "derby.jar".
 To package the executable, eclipse has a feature to export the project to an executable jar file.
 
-# Notes
+## Notes
 On subsequent executions, the database rows are purged and recreated.
 I am considering an enhancement that updates the database on subsequent executions instead of recreating it.
 
