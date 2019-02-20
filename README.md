@@ -11,7 +11,7 @@ Output is written to the standard output stream - one line per matching hash. Er
 Exit code is non-zero when errors are detected.
 Execute the utility using the following command. A bash script can simplify this by combining the first three terms.
 ### Command Line Invocation
-java -jar ~/bin/filedupfiles.jar [options] <dir1> [... <dirN>]
+java -jar ~/bin/filedupfiles.jar options directories
 
 ### Sample Output
 DUPLICATES: /home/don/test/file01.txt /home/don/test/file02.txt /home/don/test/dir1/file03.txt
