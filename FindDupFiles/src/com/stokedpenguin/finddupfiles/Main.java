@@ -41,24 +41,34 @@ package com.stokedpenguin.finddupfiles;
 
 import java.util.ArrayList;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.PrintStream;
-import java.math.BigInteger;
-import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import org.apache.derby.shared.common.error.DerbySQLIntegrityConstraintViolationException;
+import com.stokedpenguin.util.Util;
+import com.stokedpenguin.util.Md5;
 import com.stokedpenguin.util.file.DirectoryWalker;
-import com.stokedpenguin.util.file.DirectoryWalker.Notification;
 
 public class Main {
+	// Version Numbers
+	private static final int verMajor = 2;
+	private static final int verMinor = 0;
 	/** SQL for inserting record into File table */
 	private static final String sqlFileInsert = 
-			"INSERT INTO File(file_name, path_name, size, modify_time, hash_time, hash)" +
-			" VALUES(?, ?, ?, ?, ?, ?)";
+		"INSERT INTO File(file_name, path_name, size, modify_time, hash_time, hash)" +
+		" VALUES(?, ?, ?, ?, ?, ?)";
+	/** SQL for querying File by absolute file name */
+	private static final String sqlFileQuery =
+		"SELECT * FROM File WHERE path_name = ? AND file_name = ?";
+	/** SQL for updating File details */
+	private static final String sqlFileUpdate =
+		"UPDATE File SET size = ?, hash = ?, hash_time = ?, modify_time = ? WHERE id = ?";
+	/** SQL for deleting File by ID */
+	private static final String sqlFileDelete =
+		"DELETE FROM File WHERE id = ?";
 	/** Name of configuration directory, normally located in HOME directory */
 	private String configDirName = ".finddupfiles";
 	/** Error(s) detected if non-zero */
@@ -68,28 +78,36 @@ public class Main {
 	/** Directory names to search for duplicate files */
 	private ArrayList<File> dirs = new ArrayList<File>();
 	/** Object for calculating md5 sums */
-	private MessageDigest md5 = MessageDigest.getInstance("md5");
+	private Md5 md5 = new Md5();
 	/** Increase output when non-zero */
 	private int verbosity = 0;
 	/** Count of records created */
 	private long recordCount = 0;
 	/** Flag set if a new database was created during this execution */
 	private boolean reportEmpties = false;
+	/** Flag set if database should be purged. */
+	private boolean fresh = false;
+	/** New database was created for this execution */
 	private boolean newDb = false;
 	/** Database open during execution */
 	private Connection dbConn = null;
-	/** Optimize performance by only creating this statement once */
+	/** Don't process files. Just report previous result from database. */
+	private boolean reportOnly = false;
+	// Optimize performance by only creating these statements once
 	private PreparedStatement stmntFileInsert = null;
-	private static final int verMajor = 1;
-	private static final int verMinor = 0;
+	private PreparedStatement stmntFileQuery = null;
+	private PreparedStatement stmntFileUpdate = null;
+	private PreparedStatement stmntFileDelete = null;
 	/** Text for help command line option */
 	public static final String info =
 		getVersion()+
 		"Find Duplicate Files\n"+
 		"Usage: java -jar finddupfiles.jar [options] <directory1> [<directory2> ...]\n"+
 		"Options:\n"+
-		" --help     (see this text)\n"+
-		" --verbose  (see extra output on stderr)\n"+
+		" --help         See this text\n"+
+		" --refresh      Recreate all file records\n"+
+		" --report-only  Don't update. Only output existing records from database.\n"+
+		" --verbose      See extra output on stderr\n"+
 		"Written by Don Stokes <myFirstName AT myFullName DOT com>\n"+
 		"CAUTION: Reported files have same hash. "+
 		"There is a very slight chance the files are different with the same hash. "+
@@ -103,88 +121,50 @@ public class Main {
 		"";
 	
 	/**
-	 * User readable version string
-	 * @return
+	 * @return  User readable version string
 	 */
 	public static final String getVersion() {
 		return String.format("version %d.%02d\n", verMajor, verMinor);
 	}
-	
-	/**
-	 * This will probably need enhancement if MSW is supported.
-	 * @return Absolute path to current user home directory
-	 */
-	private File getHomeDir() {
-		return new File(System.getenv("HOME"));
-	}
-	
+
 	/**
 	 * Create the configuration directory if it doesn't exist.
 	 * @return Absolute path to configuration directory.
 	 * @throws Exception
 	 */
 	private File getConfigDir() throws Exception {
-		File configDir = new File(getHomeDir().getAbsolutePath() + "/" + configDirName);
+		File configDir = new File(Util.getHomeDir().getAbsolutePath() + "/" + configDirName);
 		if (!configDir.isDirectory())
 			configDir.mkdir();
 		return configDir;
 	}
 	
 	/**
-	 * Compute the MD5 sum for the specified file.
-	 * @param file
-	 * @return Hex string notation of MD5 sum.
+	 * Open the database.
+	 * Create if necessary.
+	 * @return
 	 * @throws Exception
 	 */
-	private String md5Sum(File file) throws Exception {
-		md5.reset();
-		FileInputStream fis = new FileInputStream(file);
-		byte[] buffer = new byte[512];
-		long total = 0;
-		int count;
-		while ((count = fis.read(buffer)) > 0) {
-			md5.update(buffer, 0, count);
-			total += count;
+	private Connection makeDbConn() throws Exception {
+		// Prevent derby from pooping derby.log all over the place
+		System.setProperty("derby.system.home", getConfigDir().getAbsolutePath());
+		File dbDir = new File(getConfigDir().getAbsolutePath() + "/db");
+		newDb = !dbDir.isDirectory();
+		String strConn = "jdbc:derby:" + dbDir.getAbsolutePath() + ";create=true";
+		if (verbosity > 0)
+			System.err.println("Opening database ...");
+		dbConn = DriverManager.getConnection(strConn);
+		dbConn.setAutoCommit(false);
+		if (verbosity > 0)
+			System.err.println("... database open.");
+		if (newDb) {
+			createTables();
 		}
-		fis.close();
-		if (total != file.length())
-			System.err.println("file read size mismatch on " + file.getAbsolutePath() + " expected " + file.length() + " read " + total);
-		byte[] bs = md5.digest();
-		BigInteger bi = new BigInteger(1, bs);
-		String hex = bi.toString(16);
-		// Add leading zeros if not 32 characters
-		while (hex.length() < 32) hex = "0" + hex;
-		return hex;
-	}
-	
-	/**
-	 * 
-	 * @param args
-	 * @return False if execution should be aborted
-	 */
-	private boolean parseArgs(String[] args) {
-		boolean ret = true;
-		if (args.length == 0) {
-			System.err.println("Usage: <executable> [args] <directories>  # Try --help option.");
-			return false;
-		}
-		for (int curArg = 0; curArg < args.length; curArg++) {
-			if (args[curArg].equals("--help")) {
-				System.err.printf(info);
-				ret = false;
-			} else if (args[curArg].equals("--verbose")) {
-					verbosity = 1;
-			} else {
-				File dir = new File(args[curArg]);
-				if (dir.isDirectory())
-					dirs.add(dir);
-				else {
-					exitCode = 1;
-					System.err.println("directory does not exist: " + dir.getAbsolutePath());
-				}
-			}
-		}
-		return ret;
+		stmntFileInsert = dbConn.prepareStatement(sqlFileInsert);
+		stmntFileQuery = dbConn.prepareStatement(sqlFileQuery);
+		stmntFileUpdate = dbConn.prepareStatement(sqlFileUpdate);
+		stmntFileDelete = dbConn.prepareStatement(sqlFileDelete);
+		return dbConn;
 	}
 	
 	/**
@@ -212,17 +192,98 @@ public class Main {
 	}
 
 	/**
-	 * Delete old data from previous traversal on existing database.
+	 * Traverse all File records.
+	 * Delete records for files that no longer exist in file system.
+	 * Update file details for any changed files.
+	 * @return  Count of records modified
 	 * @throws Exception
 	 */
-	private void purgeRows() throws Exception {
+	private int updateRecords() throws Exception {
+		int count = 0;
+		Statement stmntAll = dbConn.createStatement();
+		ResultSet rsltAll = stmntAll.executeQuery("SELECT * FROM File");
+		while (rsltAll.next()) {
+			File file = new File(rsltAll.getString("path_name") + "/" + rsltAll.getString("file_name"));
+			if (!file.isFile()) {
+				if (verbosity > 0)
+					System.err.println("DELETED: " +file.getAbsolutePath());
+				stmntFileDelete.setInt(1, rsltAll.getInt("id"));
+				stmntFileDelete.execute();
+				count++;
+			} else if (rsltAll.getLong("modify_time") != file.lastModified()) {
+				if (verbosity > 0)
+					System.err.println("CHANGED: " +file.getAbsolutePath());				
+				stmntFileUpdate.setLong  (1, file.length());
+				stmntFileUpdate.setString(2, md5.md5Sum(file));
+				stmntFileUpdate.setLong  (3, System.currentTimeMillis());
+				stmntFileUpdate.setLong  (4, file.lastModified());
+				stmntFileUpdate.setInt   (5, rsltAll.getInt("id"));
+				stmntFileUpdate.execute();
+				count++;
+			}
+		}
+		dbConn.commit();
+		rsltAll.close();
+		stmntAll.close();
+		return count;
+	}
+	
+	/**
+	 * Traverse directories.
+	 * Query each file for record in database.
+	 * Add records for files not in database.
+	 * @param dir  Parent directory for traversal
+	 * @return
+	 * @throws Exception
+	 */
+	private void insertMissingFiles(File dir) throws Exception {
+		DirectoryWalker dw = new DirectoryWalker(dir.getAbsolutePath());
+		dw.setContinueOnErrors(true);
+		dw.walk(new DirectoryWalker.Notification() {
+			// Unnamed class implementation for Notification interface
+			@Override
+			public boolean onFile(File file) {
+				boolean ret = true;
+				try {
+					stmntFileQuery.setString(1, file.getParent());
+					stmntFileQuery.setString(2, file.getName());
+					ResultSet rslt = stmntFileQuery.executeQuery();
+					if (!rslt.next()) {
+						if (verbosity > 0)
+							System.err.println("NEW: " + file.getAbsolutePath());
+						insertFile(file);
+					}
+					rslt.close();
+				} catch (Throwable t) {
+					ret = false;
+					exitCode = 1;
+					System.err.println(t);
+				}
+				return ret;
+			}
+			@Override
+			public boolean onDir(File file) {
+				// Nothing to do
+				return true;
+			}
+		});
+		errorCount += dw.getErrorCount();
+		if (verbosity > 0) {
+			System.err.println(Long.toString(recordCount) + " records created");
+		}
+	}
+	
+	/**
+	 * Delete all records from the specified database table.
+	 * @param table
+	 * @throws Exception
+	 */
+	private void purgeTableRows(String table) throws Exception {
 		if (verbosity > 0)
-			System.err.println("Purging rows ...");
-		String sqlDelFile = "DELETE FROM File";
-		String sqlDelDuplicate = "DELETE FROM Duplicate";
+			System.err.printf("Purging rows from %s ...\n", table);
+		String sqlDel = "DELETE FROM " + table;
  		Statement stmnt = dbConn.createStatement();
- 		stmnt.execute(sqlDelFile);
- 		stmnt.execute(sqlDelDuplicate);
+ 		stmnt.execute(sqlDel);
  		dbConn.commit();
  		stmnt.close();
 		if (verbosity > 0)
@@ -230,30 +291,14 @@ public class Main {
 	}
 	
 	/**
-	 * Open the database.
-	 * Create if necessary.
-	 * @return
+	 * Purge all data from the database.
 	 * @throws Exception
 	 */
-	private Connection makeDbConn() throws Exception {
-		// Prevent derby from pooping derby.log all over the place
-		System.setProperty("derby.system.home", getConfigDir().getAbsolutePath());
-		File dbDir = new File(getConfigDir().getAbsolutePath() + "/db");
-		newDb = !dbDir.isDirectory();
-		String strConn = "jdbc:derby:" + dbDir.getAbsolutePath() + ";create=true";
-		if (verbosity > 0)
-			System.err.println("Opening database ...");
-		dbConn = DriverManager.getConnection(strConn);
-		dbConn.setAutoCommit(false);
-		if (verbosity > 0)
-			System.err.println("... database open.");
-		if (newDb) {
-			createTables();
-		}
-		stmntFileInsert = dbConn.prepareStatement(sqlFileInsert);
-		return dbConn;
+	private void purgeRows() throws Exception {
+		purgeTableRows("Duplicate");
+		purgeTableRows("File");
 	}
-
+	
 	/**
 	 * Query the database for duplicate checksums and report findings.
 	 * @return
@@ -262,6 +307,9 @@ public class Main {
 	public long queryDups() throws Exception{
 		long dupCnt = 0;
 		long srchCnt = 0;
+		
+		// Clear previous list of duplicates
+		purgeTableRows("Duplicate");
 		
 		Statement stmntAll = dbConn.createStatement();
 		ResultSet rsltAll = stmntAll.executeQuery("SELECT * FROM File");
@@ -320,39 +368,6 @@ public class Main {
 	}
 	
 	/**
-	 * Constructor for the application.
-	 * @param args Command line parameters
-	 * @throws Exception
-	 */
-	public Main(String[] args) throws Exception {
-		if (!parseArgs(args))
-			exitCode = 1; // Cmd ln problem - abort
-		if (verbosity > 0)
-			System.err.printf(getVersion());
-		if (exitCode == 0)
-			makeDbConn();
-	}
-	
-	/**
-	 * Guts of the execution.
-	 * Called after initialization.
-	 */
-	public void run() throws Exception {
-		// Until optimized db updates are implemented, clear old data.
-		if (!newDb)
-			purgeRows();
-		for (File dir : dirs) {
-			populateDb(dir);
-		}
-		queryDups();
-		report(System.out);
-		if (errorCount > 0) {
-			System.err.printf("%d ERRORS WERE ENCOUNTERED\n", errorCount);
-			exitCode = 1;
-		}
-	}
-
-	/**
 	 * Insert a new record into the database for specified file.
 	 * @param file
 	 * @throws Exception
@@ -362,7 +377,7 @@ public class Main {
 			System.err.println(Long.toString(recordCount) + " records processed.");
 		String hash = null;
 		try {
-			hash = md5Sum(file);
+			hash = md5.md5Sum(file);
 		} catch (Throwable t) {
 			System.err.println("ERROR: " + t.getMessage());
 			errorCount++;
@@ -382,15 +397,16 @@ public class Main {
 	
 	/**
 	 * Traverse specified directory and insert a db record for each file.
+	 * Should only be run on a known empty database as it does not check
+	 * for existing records.
 	 * @param dir
 	 * @return
 	 * @throws Exception
 	 */
-	private long populateDb(File dir) throws Exception {
-		long ret = 0;	
+	private void populateDb(File dir) throws Exception {
 		DirectoryWalker dw = new DirectoryWalker(dir.getAbsolutePath());
 		dw.setContinueOnErrors(true);
-		dw.walk(new Notification() {
+		dw.walk(new DirectoryWalker.Notification() {
 			@Override
 			public boolean onFile(File file) {
 				boolean ret = true;
@@ -413,7 +429,6 @@ public class Main {
 		if (verbosity > 0) {
 			System.err.println(Long.toString(recordCount) + " records created");
 		}
-		return ret;
 	}
 	
 	/**
@@ -452,12 +467,87 @@ public class Main {
 		dbConn.commit();
 		return hashCnt;
 	}
+
+	/**
+	 * Accessor method for exit code property.
+	 * @return
+	 */
+	public int getExitCode() {
+		return exitCode;
+	}
+	
+	/**
+	 * Populate or update the File table.
+	 * @throws Exception
+	 */
+	private void evaluateDirs() throws Exception {
+		if (newDb || fresh) {
+			// Generate File records for all files traversed
+			if (fresh)
+				purgeRows();
+			for (File dir : dirs) {
+				populateDb(dir);
+			}
+		} else {
+			// Reuse File records from previous execution(s)
+			updateRecords();
+			for (File dir : dirs) {
+				insertMissingFiles(dir);
+			}
+		}		
+	}
+	
+	/**
+	 * Parse the command line parameters.
+	 * @param args
+	 * @return False if execution should be aborted
+	 */
+	private boolean parseArgs(String[] args) {
+		boolean ret = true;
+		if (args.length == 0) {
+			System.err.println("Usage: <executable> [args] <directories>  # Try --help option.");
+			return false;
+		}
+		for (int curArg = 0; curArg < args.length; curArg++) {
+			if (args[curArg].equals("--help")) {
+				System.err.printf(info);
+				ret = false;
+			} else if (args[curArg].equals("--verbose")) {
+					verbosity = 1;
+			} else if (args[curArg].equals("--refresh")) {
+				fresh = true;
+			} else if (args[curArg].equals("--report-only")) {
+				reportOnly = true;
+			} else {
+				File dir = new File(args[curArg]);
+				if (dir.isDirectory())
+					dirs.add(dir);
+				else {
+					exitCode = 1;
+					System.err.println("directory does not exist: " + dir.getAbsolutePath());
+				}
+			}
+		}
+		return ret;
+	}
 	
 	/**
 	 * Close all open resources
 	 * @throws Exception
 	 */
 	public void terminate() throws Exception {
+		if (stmntFileDelete != null) {
+			stmntFileDelete.close();
+			stmntFileDelete = null;
+		}
+		if (stmntFileUpdate != null) {
+			stmntFileUpdate.close();
+			stmntFileUpdate = null;
+		}
+		if (stmntFileQuery != null) {
+			stmntFileQuery.close();
+			stmntFileQuery = null;
+		}
 		if (stmntFileInsert != null) {
 			stmntFileInsert.close();
 			stmntFileInsert = null;
@@ -467,13 +557,35 @@ public class Main {
 			dbConn = null;
 		}
 	}
+
+	/**
+	 * Guts of the execution.
+	 * Called after initialization.
+	 */
+	public void run() throws Exception {
+		if (!reportOnly) {
+			evaluateDirs();
+			queryDups();
+		}
+		report(System.out);
+		if (errorCount > 0) {
+			System.err.printf("%d ERRORS WERE ENCOUNTERED\n", errorCount);
+			exitCode = 1;
+		}
+	}	
 	
 	/**
-	 * Accessor method for exit code property.
-	 * @return
+	 * Constructor for the application.
+	 * @param args Command line parameters
+	 * @throws Exception
 	 */
-	public int getExitCode() {
-		return exitCode;
+	public Main(String[] args) throws Exception {
+		if (!parseArgs(args))
+			exitCode = 1; // Cmd ln problem - abort
+		if (verbosity > 0)
+			System.err.printf(getVersion());
+		if (exitCode == 0)
+			makeDbConn();
 	}
 	
 	/**

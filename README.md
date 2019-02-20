@@ -52,11 +52,22 @@ If using "eclipse", modify the project build path to include the external archiv
 To package the executable, eclipse has a feature to export the project to an executable jar file.
 
 ## Notes
-On subsequent executions, the database rows are purged and recreated.
-I am considering an enhancement that updates the database on subsequent executions instead of recreating it.
+Version 1 of this program regenerated the MD5 hash database every time.
+Version 2 does not do this; instead, it updates the database for changed/deleted/new files.
+In tests with very large files, I found this cut the execution time in half.
+It is conceivable that file systems with many small files may see increased execution time due to increased database accesses.
+If you experience this, the --refresh option purges the database and executes in a manner similar to version 1.
+You should see the same performance as version 1 in this case.
 
 ## Tips
 Use the derby ij interactive shell to examine the database contents. You may find the data useful for automating duplicate management.
+
+## Version 2.00
+What's new?
+* Subsequent executions do not purge previous records. Directories are scanned for changes and the database is updated.
+* --report-only option: Only outputs results from previous database results. Directories are NOT rescanned.
+* --refresh: Purges previous results and creates output from scratch
+* Source code cleanup
 
 ## Links
 * https://db.apache.org/derby

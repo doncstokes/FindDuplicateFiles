@@ -28,7 +28,6 @@ public class DirectoryWalker {
 	private String topDir = null;
 	private int errorCount = 0;
 	private boolean continueOnErrors = false;
-	private boolean verbose = false;
 	
 	/**
 	 * Interface for callback
@@ -98,14 +97,6 @@ public class DirectoryWalker {
 			System.err.println("ERROR: "+ t.getMessage());
 		}
 		return ret;
-	}
-
-	/**
-	 * Mutator method for Verbose property
-	 * @param verbose
-	 */
-	public void setVerbose(boolean verbose) {
-		this.verbose = verbose;
 	}
 
 	/**
